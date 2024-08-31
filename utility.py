@@ -16,7 +16,6 @@ credentials = boto3.Session().get_credentials()
 bedrock_agent_client = boto3.client('bedrock-agent')
 
 
-
 def create_oss_policy_attach_bedrock_execution_role(collection_id, bedrock_kb_execution_role):
     # define oss policy document
     oss_policy_document = {
@@ -330,3 +329,58 @@ def create_access_policy_in_oss(vector_store_name, bedrock_kb_execution_role_arn
         type='data'
     )
     return access_policy
+
+
+def create_ds(data_sources, chunking_strategy_configuration, s3_data_source_configuration, knowledge_base_id):
+    ds_list=[]
+    for idx, ds in enumerate(data_sources):
+
+        if ds['type'] == "S3":
+            print(f'{idx +1 } data source: S3')
+            ds_name = f'{knowledge_base_id}'
+            s3_data_source_configuration["s3Configuration"]["bucketArn"] = f'arn:aws:s3:::{ds["bucket_name"]}'
+            data_source_configuration = s3_data_source_configuration
+        
+        response = bedrock_agent_client.list_data_sources(knowledgeBaseId=knowledge_base_id)
+        data_source_exist = False
+        for data_source in response['dataSourceSummaries']:
+            if data_source['name'] == knowledge_base_id:
+                data_source_exist = True
+                ds_list.append(data_source)
+            
+        if not data_source_exist:
+            # Create a DataSource in KnowledgeBase 
+            create_ds_response = bedrock_agent_client.create_data_source(
+                name = ds_name,
+                knowledgeBaseId = knowledge_base_id,
+                dataSourceConfiguration = data_source_configuration,
+                vectorIngestionConfiguration = {
+                    "chunkingConfiguration": chunking_strategy_configuration
+                }
+            )
+            ds = create_ds_response["dataSource"]
+            ds_list.append(ds)
+        
+    ingest_jobs=[]
+    # Start an ingestion job
+    for idx, ds in enumerate(ds_list):
+        try:
+            start_job_response = bedrock_agent_client.start_ingestion_job(knowledgeBaseId = knowledge_base_id, dataSourceId = ds["dataSourceId"])
+            job = start_job_response["ingestionJob"]
+            print(f"job {idx} started successfully\n")
+
+            while job['status'] not in ["COMPLETE", "FAILED", "STOPPED"]:
+                get_job_response = bedrock_agent_client.get_ingestion_job(
+                  knowledgeBaseId = knowledge_base_id,
+                    dataSourceId = ds["dataSourceId"],
+                    ingestionJobId = job["ingestionJobId"]
+              )
+                job = get_job_response["ingestionJob"]
+            print(job)
+
+            ingest_jobs.append(job)
+        except Exception as e:
+            print(f"Couldn't start {idx} job.\n")
+            print(e)  
+    
+    return ds_list
