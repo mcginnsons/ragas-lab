@@ -192,7 +192,7 @@ def get_matching_roles(role_list, keyword):
 
 
 
-def create_knowledge_base(index_name, body_json, collection_name, vector_store_name, access_policy_name, embedding_model_arn):   
+def create_knowledge_base(index_name, body_json, collection_name, knowledge_base_name, vector_store_name, access_policy_name, embedding_model_arn):   
     # Use the function
     all_roles = get_all_roles(iam_client)
 
@@ -259,7 +259,7 @@ def create_knowledge_base(index_name, body_json, collection_name, vector_store_n
             }
         }
 
-    name = f"{collection_name}-knowledge-base"
+    name = f"{knowledge_base_name}-knowledge-base"
     
     # Create a KnowledgeBase
     @retry(wait_random_min=1000, wait_random_max=2000,stop_max_attempt_number=7)
