@@ -285,14 +285,14 @@ def create_knowledge_base(index_name, body_json, collection_name, vector_store_n
         for kb in response['knowledgeBaseSummaries']:
             if kb['name'] == name:
                 knowledge_base_found = True
-                return kb['knowledgeBaseId']
+                return kb
             
         if not knowledge_base_exist:
             kb = create_knowledge_base_func()
     except Exception as err:
         print(f"{err=}, {type(err)=}")
     
-    return kb['knowledgeBaseId']
+    return kb
 
 
 
