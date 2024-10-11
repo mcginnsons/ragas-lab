@@ -88,7 +88,6 @@ def interactive_sleep(seconds: int):
         dots += '.'
         print(dots, end='\r')
         time.sleep(1)
-    print('Done!')
 
 def create_bedrock_execution_role_multi_ds(bucket_names):
     foundation_model_policy_document = {
@@ -192,7 +191,35 @@ def get_matching_roles(role_list, keyword):
 
 
 
-def create_knowledge_base(index_name, body_json, collection_name, knowledge_base_name, vector_store_name, access_policy_name, embedding_model_arn):   
+def create_knowledge_base(index_name, collection_name, knowledge_base_name, vector_store_name, access_policy_name, embedding_model_arn):   
+    
+    body_json = {
+       "settings": {
+          "index.knn": "true",
+           "number_of_shards": 1,
+           "knn.algo_param.ef_search": 512,
+           "number_of_replicas": 0,
+       },
+       "mappings": {
+          "properties": {
+             "vector": {
+                "type": "knn_vector",
+                "dimension": 1024,
+                 "method": {
+                     "name": "hnsw",
+                     "engine": "faiss",
+                     "space_type": "l2"
+                 },
+             },
+             "text": {
+                "type": "text"
+             },
+             "text-metadata": {
+                "type": "text"         }
+          }
+       }
+    }
+    
     # Use the function
     all_roles = get_all_roles(iam_client)
 
@@ -211,10 +238,12 @@ def create_knowledge_base(index_name, body_json, collection_name, knowledge_base
             if policy['name'] == access_policy_name:
                 policy_exist = True
         if not policy_exist:
+            print(f"Creating opensearch serverless access policy for vector store: {vector_store_name}\n")
             access_policy = create_access_policy_in_oss(vector_store_name=vector_store_name,
                         bedrock_kb_execution_role_arn=bedrock_kb_execution_role_arn,
                         access_policy_name=access_policy_name)
             interactive_sleep(60)
+            print(f"Opensearch Serverless access policy creation for vector store: {vector_store_name} complete!!\n")
     except Exception as e: 
         print(f'Error while trying to create the access policy, with error {e}')
 
@@ -237,12 +266,12 @@ def create_knowledge_base(index_name, body_json, collection_name, knowledge_base
     try:
         indexExists = oss_client.indices.exists(index=index_name)
         if not indexExists:
+            print(f"Creating index: {index_name}\n")
             response = oss_client.indices.create(index=index_name, body=json.dumps(body_json))
-            print('\nCreating index:')
-            print(response)
 
             # index creation can take up to a minute
             interactive_sleep(60)
+            print(f"Index creation for index: {index_name} complete!!\n")
     except RequestError as e:
         # you can delete the index if its already exists
         # oss_client.indices.delete(index=index_name)
@@ -288,7 +317,9 @@ def create_knowledge_base(index_name, body_json, collection_name, knowledge_base
                 return kb
             
         if not knowledge_base_exist:
+            print("Creating knowledge base...\n")
             kb = create_knowledge_base_func()
+            print(f"Knowledge base: {kb['name']} created!!\n")
     except Exception as err:
         print(f"{err=}, {type(err)=}")
     
@@ -331,12 +362,25 @@ def create_access_policy_in_oss(vector_store_name, bedrock_kb_execution_role_arn
     return access_policy
 
 
-def create_ds(data_sources, chunking_strategy_configuration, s3_data_source_configuration, knowledge_base_id):
+def create_ds(chunking_strategy_configuration, knowledge_base_id, bucket):
+    
+    s3_data_source_configuration = {
+    "type": "S3",
+    "s3Configuration": {
+        "bucketArn": "",
+        "inclusionPrefixes":["octank_financial_10K.pdf"] 
+        }
+    }
+
+    data_sources=[
+                {"type": "S3", "bucket_name": bucket} 
+            ]
+    
+    
     ds_list=[]
     for idx, ds in enumerate(data_sources):
 
         if ds['type'] == "S3":
-            print(f'{idx +1 } data source: S3')
             ds_name = f'{knowledge_base_id}'
             s3_data_source_configuration["s3Configuration"]["bucketArn"] = f'arn:aws:s3:::{ds["bucket_name"]}'
             data_source_configuration = s3_data_source_configuration
@@ -367,7 +411,7 @@ def create_ds(data_sources, chunking_strategy_configuration, s3_data_source_conf
         try:
             start_job_response = bedrock_agent_client.start_ingestion_job(knowledgeBaseId = knowledge_base_id, dataSourceId = ds["dataSourceId"])
             job = start_job_response["ingestionJob"]
-            print(f"job {idx} started successfully\n")
+            print(f"Starting syncing job for Knowledge Base ID: {knowledge_base_id}\n")
 
             while job['status'] not in ["COMPLETE", "FAILED", "STOPPED"]:
                 get_job_response = bedrock_agent_client.get_ingestion_job(
@@ -376,7 +420,7 @@ def create_ds(data_sources, chunking_strategy_configuration, s3_data_source_conf
                     ingestionJobId = job["ingestionJobId"]
               )
                 job = get_job_response["ingestionJob"]
-            print(job)
+            print(f"Sync job for Knowledge Base ID: {knowledge_base_id} complete\n")
 
             ingest_jobs.append(job)
         except Exception as e:

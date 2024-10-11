@@ -1,0 +1,608 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: |
+  This solution creates an Amazon SageMaker Studio domain along with the necessary resources required for Ragas and Langchain Workshop.
+Parameters:
+  UserProfileName:
+    Type: String
+    Description: The user profile name for the Ragas Immersion Day workshop
+    Default: 'SageMakerUser'
+  DomainName:
+    Type: String
+    Description: The domain name of the Sagemaker studio instance
+    Default: 'RagasSagemakerDomain'
+  VPCFlowLogS3Bucket:
+    Type: String
+    Description: The S3 bucket keeps the VPC FlowLog in the same region (optional)
+    Default: ''
+  S3CodeBucket:
+    Description: The S3 Bucket holding the workshop repo tar file. To leave the repository empty, leave blank.
+    Type: String
+    Default: AWS::NoValue
+
+  
+Mappings: 
+  RegionMap:
+    us-east-1: 
+      datascience: "arn:aws:sagemaker:us-east-1:081325390199:image/sagemaker-data-science-310-v1"
+      jupyter: "arn:aws:sagemaker:us-east-1:081325390199:image/jupyter-server-3"
+    us-west-2: 
+      datascience: "arn:aws:sagemaker:us-west-2:236514542706:image/sagemaker-data-science-310-v1"
+      jupyter: "arn:aws:sagemaker:us-west-2:236514542706:image/jupyter-server-3"
+Conditions:
+  CreateVpcFlowLog: !Not
+      - !Equals
+        - !Ref VPCFlowLogS3Bucket
+        - '' 
+
+Resources:
+  StudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join
+        - "-"
+        - - "sagemaker-studio"
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId"
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: Private
+      LoggingConfiguration:
+        LogFilePrefix: sagemaker-studio-logs
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:      
+      RoleName: RagasSageMakerExecutionRole
+      Description: 'Ragas workshop role sagemaker studio'     
+      Policies: 
+        - PolicyName: ragas-workshop-sagemaker-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - sagemaker:Describe*
+                  - sagemaker:List*
+                  - sagemaker:*App
+                  - sagemaker:createPresignedDomainUrl
+                Resource: '*'
+        - PolicyName: ragas-workshop-bedrock-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - bedrock:Retrieve*
+                  - bedrock:InvokeModel*
+                  - bedrock:CreateKnowledgeBase*
+                  - bedrock:CreateDataSource*
+                  - bedrock:StartIngestionJob*
+                  - bedrock:ListKnowledgeBases*
+                  - bedrock:ListDataSources*
+                  - bedrock:GetIngestionJob*
+                Resource: '*'
+        - PolicyName: ragas-workshop-aoss-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - aoss:*
+                Resource: '*'
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Principal: 
+              Service: 
+                - sagemaker.amazonaws.com                
+            Action: 
+              - sts:AssumeRole
+            Condition:
+              ArnLikeIfExists: 
+                aws:SourceArn: !Sub "arn:aws:sagemaker:*:${AWS::AccountId}:*"
+  
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/IAMReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  PassSageMakerRolePolicy:        
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: ragas-workshop-pass-role
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: !GetAtt SageMakerExecutionRole.Arn
+            Condition:
+              StringLikeIfExists:
+                "iam:PassedToService": 
+                  - "sagemaker.amazonaws.com"
+      Roles:
+        - !Ref SageMakerExecutionRole 
+  PassBedrockRolePolicy:        
+    Type: 'AWS::IAM::Policy'
+    DependsOn: AmazonBedrockExecutionRoleForKnowledgeBases
+    Properties:
+      PolicyName: ragas-workshop-pass-role-bedrock
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: !GetAtt AmazonBedrockExecutionRoleForKnowledgeBases.Arn
+      Roles:
+        - !Ref SageMakerExecutionRole 
+
+  AmazonBedrockExecutionRoleForKnowledgeBases:
+    Type: AWS::IAM::Role
+    Properties:      
+      Description: 'Ragas workshop role amazon bedrock knowledge bases'     
+      Policies: 
+        - PolicyName: ragas-workshop-bedrock-model-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: 
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/cohere.embed-english-v3
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+        - PolicyName: ragas-workshop-bedrock-s3-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: '*'
+        - PolicyName: ragas-workshop-bedrock-aoss-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: '*'
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Principal: 
+              Service: 
+                - bedrock.amazonaws.com               
+            Action: 
+              - sts:AssumeRole
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.0/20
+      VpcId: !Ref VPC
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.32.0/20
+      VpcId: !Ref VPC
+
+  FlowLog:
+    Type: 'AWS::EC2::FlowLog'
+    Condition: CreateVpcFlowLog
+    Properties:
+      LogDestination: !Sub arn:aws:s3:::${VPCFlowLogS3Bucket}
+      LogDestinationType: s3
+      ResourceId: !Ref VPC
+      ResourceType: 'VPC'
+      TrafficType: REJECT
+
+  OpenSearchServerlessAmazonTitanEmbeddingV2:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Description: 'OpenSearch Serverless Collection for Amazon Titan Embedding V2 data'
+      Name: 'amazon-titan-embedding-v2'
+      Type: VECTORSEARCH
+    DependsOn: 
+      - TitanEncryptionPolicy
+      - TitanNetworkPolicy
+  TitanEncryptionPolicy:
+    Type: 'AWS::OpenSearchServerless::SecurityPolicy'
+    Properties:
+      Name: amazon-titan-encryption-policy
+      Type: encryption
+      Description: Encryption policy for amazon-titan-embedding-v2
+      Policy: >-
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/amazon-titan-embedding-v2"]}],"AWSOwnedKey":true}
+  TitanNetworkPolicy:
+      Type: 'AWS::OpenSearchServerless::SecurityPolicy'
+      Properties:
+        Name: amazon-titan-network-policy
+        Type: network
+        Description: Network policy for amazon-titan-embedding-v2
+        Policy: >-
+          [{"Rules":[{"ResourceType":"collection","Resource":["collection/amazon-titan-embedding-v2"]}],"AllowFromPublic":true}]
+    
+  OpenSearchServerlessCohereEmbedEnglishV3:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Description: 'OpenSearch Serverless Collection for Cohere Embed English V3 data'
+      Name: 'cohere-embed-english-v3'
+      Type: VECTORSEARCH
+    DependsOn: 
+      - CohereEncryptionPolicy
+      - CohereNetworkPolicy
+  CohereEncryptionPolicy:
+    Type: 'AWS::OpenSearchServerless::SecurityPolicy'
+    Properties:
+      Name: cohere-embed-encryption-policy
+      Type: encryption
+      Description: Encryption policy for cohere-embed-english-v3
+      Policy: >-
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/cohere-embed-english-v3"]}],"AWSOwnedKey":true}
+  CohereNetworkPolicy:
+      Type: 'AWS::OpenSearchServerless::SecurityPolicy'
+      Properties:
+        Name: cohere-embed-network-policy
+        Type: network
+        Description: Network policy for cohere-embed-english-v3
+        Policy: >-
+          [{"Rules":[{"ResourceType":"collection","Resource":["collection/cohere-embed-english-v3"]}],"AllowFromPublic":true}]
+
+
+  StudioDomain:
+    Type: AWS::SageMaker::Domain
+    DependsOn: 
+      - SageMakerExecutionRole
+      - VPC
+      - PrivateSubnet
+      - PublicSubnet
+    Properties: 
+      VpcId: !Ref VPC
+      AppNetworkAccessType: PublicInternetOnly
+      AuthMode: IAM
+      DefaultUserSettings: 
+          ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+      DomainName: !Ref DomainName 
+      SubnetIds: [!Ref PrivateSubnet, !Ref PublicSubnet]
+
+  UserProfile:
+    Type: AWS::SageMaker::UserProfile
+    DependsOn: StudioDomain
+    Properties: 
+      DomainId: !GetAtt StudioDomain.DomainId
+      UserProfileName: !Ref UserProfileName
+      UserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+
+  JupyterApp:
+    Type: AWS::SageMaker::App
+    DependsOn:
+      - LifeCycleConfigLambdaInvoke
+    Properties:
+      AppName: default
+      AppType: JupyterServer
+      DomainId: !GetAtt StudioDomain.DomainId
+      UserProfileName: !Ref UserProfileName
+      ResourceSpec:
+        InstanceType: system
+        SageMakerImageArn: !FindInMap
+          - RegionMap
+          - !Ref "AWS::Region"
+          - jupyter
+  
+  DataScienceApp:
+    Type: AWS::SageMaker::App
+    DependsOn: JupyterApp
+    Properties:
+      AppName: sagemaker-ds-3-instance
+      AppType: KernelGateway
+      DomainId: !GetAtt StudioDomain.DomainId
+      UserProfileName: !Ref UserProfileName
+      ResourceSpec:
+        InstanceType: ml.t3.medium
+        SageMakerImageArn: !FindInMap
+          - RegionMap
+          - !Ref "AWS::Region"
+          - datascience
+
+  StudioBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StudioBucket
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - s3:GetObject*
+              - s3:PutObject*
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:PutBucket*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${StudioBucket}
+              - !Sub arn:aws:s3:::${StudioBucket}/*
+            Principal:
+              AWS:
+                - !GetAtt SageMakerExecutionRole.Arn
+
+  ####################################################################################################################
+  #### LifeCycle Configuration to download notebooks
+  ####################################################################################################################
+
+  LifeCycleConfigLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: !Sub 'LifeCycleConfigLambdaPolicy-${AWS::StackName}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:CreateStudioLifecycleConfig'
+                  - 'sagemaker:DeleteStudioLifecycleConfig'
+                Resource: !Sub 'arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:studio-lifecycle-config/*'
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:UpdateUserProfile'
+                  - 'sagemaker:DeleteUserProfile'
+                Resource: !Sub 'arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:user-profile/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: '*'
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LifeCycleConfigLambda:
+    DependsOn:
+      - LifeCycleConfigLambdaRole
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: Add LifeCycle Configuration to copy NB files to Studio
+      Handler: index.lambda_handler
+      Role: !GetAtt LifeCycleConfigLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Code:
+        ZipFile: !Join
+          - |+
+
+          - - 'import boto3'
+            - 'import base64'
+            - 'import cfnresponse'
+            - ''
+            - 'client = boto3.client(''sagemaker'')'
+            - 'lcc_up1 = ''\n''.join(('
+            - '    ''#!/bin/bash'','
+            - '    '''','
+            - '    ''set -ex'','
+            - '    '''','
+            - !Sub '    ''aws s3 cp s3://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0/889b4064-8ca8-4fd0-a404-d44c5a3def13/archive.tar .'','
+            - '    ''tar -xvf archive.tar'','
+            - '    ''rm archive.tar'','
+            - '    '''','
+            - '))'
+            - ''
+            - !Sub 'lcc_name_up1 = "${AWS::StackName}-copy-notebooks"'
+            - !Sub 'up1 = "${UserProfile}"'
+            - ''
+            - 'def get_lcc_base64_string(lcc_string):'
+            - '    lcc_bytes = lcc_string.encode("ascii")'
+            - '    base64_lcc_bytes = base64.b64encode(lcc_bytes)'
+            - '    base64_lcc_string = base64_lcc_bytes.decode("ascii")'
+            - '    return base64_lcc_string'
+            - ''
+            - ''
+            - 'def apply_lcc_to_user_profile(base64_lcc_string, lcc_config_name, profile):'
+            - '    response = client.create_studio_lifecycle_config('
+            - '        StudioLifecycleConfigName=lcc_config_name,'
+            - '        StudioLifecycleConfigContent=base64_lcc_string,'
+            - '        StudioLifecycleConfigAppType="JupyterServer",'
+            - '   )'
+            - ''
+            - '    lcc_arn = response["StudioLifecycleConfigArn"]'
+            - '    update_up = client.update_user_profile('
+            - '        DomainId=profile.split("|")[1],'
+            - '        UserProfileName=profile.split("|")[0],'
+            - '        UserSettings={'
+            - '            "JupyterServerAppSettings": {'
+            - '                "DefaultResourceSpec": {"LifecycleConfigArn": lcc_arn},'
+            - '                "LifecycleConfigArns": [lcc_arn]'
+            - '            }'
+            - '        }'
+            - '    )'
+            - '    return update_up'
+            - ''
+            - ''
+            - 'def lambda_handler(event, context):'
+            - '    print(event)'
+            - '    try:'
+            - '        base64_lcc_up1_string = get_lcc_base64_string(lcc_up1)'
+            - '        updated_up1 = apply_lcc_to_user_profile('
+            - '            base64_lcc_up1_string,'
+            - '            lcc_name_up1,'
+            - '            up1'
+            - '        )'
+            - '        print("Response User Profile LCC update for UP1")'
+            - '        print(updated_up1)'
+            - ''
+            - '        response_value = 120'
+            - '        response_data = {"Data": response_value}'
+            - '        cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)'
+            - '    except Exception as e:'
+            - '        if "RequestType" in event:'
+            - '            if event["RequestType"] == "Delete":'
+            - '                try:'
+            - '                    response1 = client.delete_studio_lifecycle_config('
+            - '                        StudioLifecycleConfigName=lcc_name_up1'
+            - '                    )'
+            - '                    print(response1)'
+            - '                    response_data = {}'
+            - '                    cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)'
+            - '                    return'
+            - '                except Exception as e2:'
+            - '                    print(e2)'
+            - '                    response_data = e2'
+            - '                    cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)'
+            - '                    return'
+            - '        print(e)'
+            - '        response_data = {"Data": str(e)}'
+            - '        cfnresponse.send(event, context, cfnresponse.FAILED, response_data)'
+
+  LifeCycleConfigLambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: 
+      - LifeCycleConfigLambda
+      - UserProfile
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt LifeCycleConfigLambda.Arn
+
+  LifeCycleConfigLambda2:
+    DependsOn:
+      - LifeCycleConfigLambdaRole
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: Add LifeCycle Configuration to install pip libs
+      Handler: index.lambda_handler
+      Role: !GetAtt LifeCycleConfigLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 500
+      Code:
+        ZipFile: !Join
+          - |+
+
+          - - 'import boto3'
+            - 'import base64'
+            - 'import cfnresponse'
+            - ''
+            - 'client = boto3.client(''sagemaker'')'
+            - 'lcc_up1 = ''\n''.join(('
+            - '    ''#!/bin/bash'','
+            - '    '''','
+            - '    ''set -ex'','
+            - '    '''','
+            - '    ''pip install ragas opensearch-py langchain-aws retrying'','
+            - '    '''','
+            - '))'
+            - ''
+            - !Sub 'lcc_name_up1 = "${AWS::StackName}-pip-install"'
+            - !Sub 'up1 = "${UserProfile}"'
+            - ''
+            - 'def get_lcc_base64_string(lcc_string):'
+            - '    lcc_bytes = lcc_string.encode("ascii")'
+            - '    base64_lcc_bytes = base64.b64encode(lcc_bytes)'
+            - '    base64_lcc_string = base64_lcc_bytes.decode("ascii")'
+            - '    return base64_lcc_string'
+            - ''
+            - ''
+            - 'def apply_lcc_to_user_profile(base64_lcc_string, lcc_config_name, profile):'
+            - '    response = client.create_studio_lifecycle_config('
+            - '        StudioLifecycleConfigName=lcc_config_name,'
+            - '        StudioLifecycleConfigContent=base64_lcc_string,'
+            - '        StudioLifecycleConfigAppType="KernelGateway",'
+            - '   )'
+            - ''
+            - '    lcc_arn = response["StudioLifecycleConfigArn"]'
+            - '    update_up = client.update_user_profile('
+            - '        DomainId=profile.split("|")[1],'
+            - '        UserProfileName=profile.split("|")[0],'
+            - '        UserSettings={'
+            - '            "KernelGatewayAppSettings": {'
+            - '                "DefaultResourceSpec": {"LifecycleConfigArn": lcc_arn},'
+            - '                "LifecycleConfigArns": [lcc_arn]'
+            - '            }'
+            - '        }'
+            - '    )'
+            - '    return update_up'
+            - ''
+            - ''
+            - 'def lambda_handler(event, context):'
+            - '    print(event)'
+            - '    try:'
+            - '        base64_lcc_up1_string = get_lcc_base64_string(lcc_up1)'
+            - '        updated_up1 = apply_lcc_to_user_profile('
+            - '            base64_lcc_up1_string,'
+            - '            lcc_name_up1,'
+            - '            up1'
+            - '        )'
+            - '        print("Response User Profile LCC update for UP1")'
+            - '        print(updated_up1)'
+            - ''
+            - '        response_value = 120'
+            - '        response_data = {"Data": response_value}'
+            - '        cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)'
+            - '    except Exception as e:'
+            - '        if "RequestType" in event:'
+            - '            if event["RequestType"] == "Delete":'
+            - '                try:'
+            - '                    response1 = client.delete_studio_lifecycle_config('
+            - '                        StudioLifecycleConfigName=lcc_name_up1'
+            - '                    )'
+            - '                    print(response1)'
+            - '                    response_data = {}'
+            - '                    cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)'
+            - '                    return'
+            - '                except Exception as e2:'
+            - '                    print(e2)'
+            - '                    response_data = e2'
+            - '                    cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)'
+            - '                    return'
+            - '        print(e)'
+            - '        response_data = {"Data": str(e)}'
+            - '        cfnresponse.send(event, context, cfnresponse.FAILED, response_data)'
+
+  LifeCycleConfigLambdaInvoke2:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: 
+      - LifeCycleConfigLambda2
+      - UserProfile
+      - LifeCycleConfigLambdaInvoke
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt LifeCycleConfigLambda2.Arn
